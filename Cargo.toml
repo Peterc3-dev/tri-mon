@@ -1,0 +1,13 @@
+[package]
+name = "tri-mon"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time tri-processor system monitor for GPD Pocket 4"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+
+[profile.release]
+opt-level = 2
+strip = true
