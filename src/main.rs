@@ -18,8 +18,8 @@ const REFRESH_MS: u64 = 200;
 const NUM_CPUS: usize = 24;
 const TOP_N: usize = 5;
 
-const GREEN: Color = Color::Rgb(0x33, 0xFF, 0x33);
-const DIM_GREEN: Color = Color::Rgb(0x11, 0x88, 0x11);
+const GREEN: Color = Color::Rgb(0, 255, 200);
+const DIM_GREEN: Color = Color::Rgb(0, 128, 100);
 const BG: Color = Color::Black;
 
 // ---------------------------------------------------------------------------
@@ -433,7 +433,7 @@ fn render_cpu(cpu: &CpuData, area: Rect, buf: &mut Buffer) {
             lines.push(Line::from(vec![
                 Span::styled(format!("{:>2} ", i), Style::default().fg(DIM_GREEN)),
                 Span::styled(bar, Style::default().fg(GREEN)),
-                Span::styled(pad, Style::default().fg(Color::Rgb(0x0a, 0x33, 0x0a))),
+                Span::styled(pad, Style::default().fg(Color::Rgb(0, 50, 40))),
                 Span::styled(format!(" {:>4}", freq), Style::default().fg(GREEN)),
             ]));
         }
@@ -485,7 +485,7 @@ fn render_gpu(gpu: &GpuData, area: Rect, buf: &mut Buffer) {
             .gauge_style(
                 Style::default()
                     .fg(GREEN)
-                    .bg(Color::Rgb(0x0a, 0x33, 0x0a)),
+                    .bg(Color::Rgb(0, 50, 40)),
             )
             .percent(vram_pct.min(100))
             .render(gauge_area, buf);
@@ -515,7 +515,7 @@ fn render_gpu(gpu: &GpuData, area: Rect, buf: &mut Buffer) {
             .gauge_style(
                 Style::default()
                     .fg(GREEN)
-                    .bg(Color::Rgb(0x0a, 0x33, 0x0a)),
+                    .bg(Color::Rgb(0, 50, 40)),
             )
             .percent(gtt_pct.min(100))
             .render(gauge_area, buf);
@@ -528,7 +528,7 @@ fn render_gpu(gpu: &GpuData, area: Rect, buf: &mut Buffer) {
     let busy_pad: String = "\u{2591}".repeat(w.saturating_sub(busy_bar_len));
     Paragraph::new(Line::from(vec![
         Span::styled(&busy_bar, Style::default().fg(GREEN)),
-        Span::styled(&busy_pad, Style::default().fg(Color::Rgb(0x0a, 0x33, 0x0a))),
+        Span::styled(&busy_pad, Style::default().fg(Color::Rgb(0, 50, 40))),
     ]))
     .render(rows[2], buf);
 }
@@ -650,7 +650,7 @@ fn render_mem(mem: &MemData, area: Rect, buf: &mut Buffer) {
             .gauge_style(
                 Style::default()
                     .fg(GREEN)
-                    .bg(Color::Rgb(0x0a, 0x33, 0x0a)),
+                    .bg(Color::Rgb(0, 50, 40)),
             )
             .percent((ram_pct as u16).min(100))
             .render(gauge_area, buf);
@@ -678,7 +678,7 @@ fn render_mem(mem: &MemData, area: Rect, buf: &mut Buffer) {
             .gauge_style(
                 Style::default()
                     .fg(GREEN)
-                    .bg(Color::Rgb(0x0a, 0x33, 0x0a)),
+                    .bg(Color::Rgb(0, 50, 40)),
             )
             .percent((swap_pct as u16).min(100))
             .render(gauge_area, buf);
@@ -738,7 +738,7 @@ fn render_procs(top_cpu: &[ProcInfo], top_mem: &[ProcInfo], area: Rect, buf: &mu
             .title(" by CPU ")
             .title_style(Style::default().fg(GREEN))
             .borders(Borders::RIGHT)
-            .border_style(Style::default().fg(Color::Rgb(0x0a, 0x33, 0x0a))),
+            .border_style(Style::default().fg(Color::Rgb(0, 50, 40))),
     );
 
     Widget::render(cpu_table, halves[0], buf);
