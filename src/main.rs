@@ -144,14 +144,8 @@ fn collect_cpu(state: &mut AppState, k10temp_path: &Option<String>) -> CpuData {
     let cur = read_all_cpu_times();
 
     // Overall = index 0 ("cpu" line)
-    let overall_pct = if !cur.is_empty() {
-        let d_total = cur[0].total.saturating_sub(state.prev_total_sum);
-        let d_idle = cur[0].idle.saturating_sub(state.prev_total_idle);
-        if d_total > 0 {
-            (1.0 - d_idle as f64 / d_total as f64) * 100.0
-        } else {
-            0.0
-        }
+    let overall_pct = if let Some(c) = cur.first() {
+        cpu_busy_pct(state.prev_total_idle, state.prev_total_sum, c.idle, c.total)
     } else {
         0.0
     };
@@ -165,10 +159,7 @@ fn collect_cpu(state: &mut AppState, k10temp_path: &Option<String>) -> CpuData {
     // Per-core frequencies
     let mut freqs = Vec::with_capacity(NUM_CPUS);
     for i in 0..NUM_CPUS {
-        let path = format!(
-            "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-            i
-        );
+        let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
         let khz = read_u64(&path).unwrap_or(0);
         freqs.push((khz / 1000) as u32);
     }
@@ -191,6 +182,51 @@ fn collect_cpu(state: &mut AppState, k10temp_path: &Option<String>) -> CpuData {
 // GPU
 // ---------------------------------------------------------------------------
 
+/// Parse the active clock (MHz) from `pp_dpm_sclk` contents.
+///
+/// The active DPM state is marked with a trailing `*`, e.g.:
+/// ```text
+/// 0: 200Mhz
+/// 1: 728Mhz *
+/// ```
+fn parse_active_sclk(contents: &str) -> Option<u32> {
+    for line in contents.lines() {
+        if line.contains('*') {
+            for p in line.split_whitespace() {
+                if let Some(stripped) = p.strip_suffix("Mhz").or_else(|| p.strip_suffix("MHz")) {
+                    return stripped.parse::<u32>().ok();
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Compute overall CPU busy percentage from the change in idle and total jiffies.
+fn cpu_busy_pct(prev_idle: u64, prev_total: u64, cur_idle: u64, cur_total: u64) -> f64 {
+    let d_total = cur_total.saturating_sub(prev_total);
+    let d_idle = cur_idle.saturating_sub(prev_idle);
+    if d_total > 0 {
+        (1.0 - d_idle as f64 / d_total as f64) * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// Parse `(orig_kb, compr_kb)` from a zram `mm_stat` line (values are in bytes).
+fn parse_zram_mm_stat(line: &str) -> (u64, u64) {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let orig = parts
+        .first()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let compr = parts
+        .get(1)
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    (orig / 1024, compr / 1024)
+}
+
 fn collect_gpu(card: Option<u32>, amdgpu_hwmon: &Option<String>) -> GpuData {
     let base = card.map(|n| format!("/sys/class/drm/card{}/device", n));
 
@@ -210,22 +246,7 @@ fn collect_gpu(card: Option<u32>, amdgpu_hwmon: &Option<String>) -> GpuData {
     let clock = base
         .as_ref()
         .and_then(|b| read_trim(&format!("{}/pp_dpm_sclk", b)))
-        .and_then(|s| {
-            for line in s.lines() {
-                if line.contains('*') {
-                    // "1: 728Mhz *"
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    for p in &parts {
-                        if let Some(stripped) =
-                            p.strip_suffix("Mhz").or_else(|| p.strip_suffix("MHz"))
-                        {
-                            return stripped.parse::<u32>().ok();
-                        }
-                    }
-                }
-            }
-            None
-        })
+        .and_then(|s| parse_active_sclk(&s))
         .unwrap_or(0);
 
     let temp = amdgpu_hwmon
@@ -292,18 +313,7 @@ fn collect_mem() -> MemData {
 
     // ZRAM: mm_stat fields: orig_data_size compr_data_size mem_used_total ...
     let (zram_orig, zram_compr) = read_trim("/sys/block/zram0/mm_stat")
-        .map(|s| {
-            let parts: Vec<&str> = s.split_whitespace().collect();
-            let orig = parts
-                .first()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0);
-            let compr = parts
-                .get(1)
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0);
-            (orig / 1024, compr / 1024) // bytes -> KB
-        })
+        .map(|s| parse_zram_mm_stat(&s))
         .unwrap_or((0, 0));
 
     MemData {
@@ -338,8 +348,7 @@ fn collect_top_procs() -> (Vec<ProcInfo>, Vec<ProcInfo>) {
                                 continue;
                             }
                             let comm = stat[start + 1..end].to_string();
-                            let rest: Vec<&str> =
-                                stat[end + 2..].split_whitespace().collect();
+                            let rest: Vec<&str> = stat[end + 2..].split_whitespace().collect();
                             // fields after ')': state(0) ppid(1) ... utime(11) stime(12) ... rss(21)
                             if rest.len() > 21 {
                                 let utime: u64 = rest[11].parse().unwrap_or(0);
@@ -355,7 +364,7 @@ fn collect_top_procs() -> (Vec<ProcInfo>, Vec<ProcInfo>) {
     }
 
     // Top by CPU (raw ticks — we show relative share)
-    procs.sort_by(|a, b| b.2.cmp(&a.2));
+    procs.sort_by_key(|p| std::cmp::Reverse(p.2));
     let total_ticks: u64 = procs.iter().map(|p| p.2).sum();
     let top_cpu: Vec<ProcInfo> = procs
         .iter()
@@ -373,7 +382,7 @@ fn collect_top_procs() -> (Vec<ProcInfo>, Vec<ProcInfo>) {
         .collect();
 
     // Top by memory
-    procs.sort_by(|a, b| b.3.cmp(&a.3));
+    procs.sort_by_key(|p| std::cmp::Reverse(p.3));
     let top_mem: Vec<ProcInfo> = procs
         .iter()
         .take(TOP_N)
@@ -482,11 +491,7 @@ fn render_gpu(gpu: &GpuData, area: Rect, buf: &mut Buffer) {
             height: 1,
         };
         Gauge::default()
-            .gauge_style(
-                Style::default()
-                    .fg(GREEN)
-                    .bg(Color::Rgb(0, 50, 40)),
-            )
+            .gauge_style(Style::default().fg(GREEN).bg(Color::Rgb(0, 50, 40)))
             .percent(vram_pct.min(100))
             .render(gauge_area, buf);
     }
@@ -512,11 +517,7 @@ fn render_gpu(gpu: &GpuData, area: Rect, buf: &mut Buffer) {
             height: 1,
         };
         Gauge::default()
-            .gauge_style(
-                Style::default()
-                    .fg(GREEN)
-                    .bg(Color::Rgb(0, 50, 40)),
-            )
+            .gauge_style(Style::default().fg(GREEN).bg(Color::Rgb(0, 50, 40)))
             .percent(gtt_pct.min(100))
             .render(gauge_area, buf);
     }
@@ -647,11 +648,7 @@ fn render_mem(mem: &MemData, area: Rect, buf: &mut Buffer) {
             height: 1,
         };
         Gauge::default()
-            .gauge_style(
-                Style::default()
-                    .fg(GREEN)
-                    .bg(Color::Rgb(0, 50, 40)),
-            )
+            .gauge_style(Style::default().fg(GREEN).bg(Color::Rgb(0, 50, 40)))
             .percent((ram_pct as u16).min(100))
             .render(gauge_area, buf);
     }
@@ -675,11 +672,7 @@ fn render_mem(mem: &MemData, area: Rect, buf: &mut Buffer) {
             height: 1,
         };
         Gauge::default()
-            .gauge_style(
-                Style::default()
-                    .fg(GREEN)
-                    .bg(Color::Rgb(0, 50, 40)),
-            )
+            .gauge_style(Style::default().fg(GREEN).bg(Color::Rgb(0, 50, 40)))
             .percent((swap_pct as u16).min(100))
             .render(gauge_area, buf);
     }
@@ -710,8 +703,7 @@ fn render_procs(top_cpu: &[ProcInfo], top_mem: &[ProcInfo], area: Rect, buf: &mu
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
     // CPU table
-    let cpu_header =
-        Row::new(vec!["PID", "Name", "CPU%"]).style(Style::default().fg(GREEN).bold());
+    let cpu_header = Row::new(vec!["PID", "Name", "CPU%"]).style(Style::default().fg(GREEN).bold());
     let cpu_rows: Vec<Row> = top_cpu
         .iter()
         .map(|p| {
@@ -817,7 +809,7 @@ fn ui(
     let right = Layout::vertical([
         Constraint::Length(7), // GPU
         Constraint::Length(7), // Memory
-        Constraint::Min(5),   // NPU
+        Constraint::Min(5),    // NPU
     ])
     .split(top[1]);
 
@@ -895,4 +887,78 @@ fn main() -> io::Result<()> {
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests (pure parsing / formatting logic only — no terminal IO)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_name_leaves_short_names_untouched() {
+        assert_eq!(truncate_name("bash", 18), "bash");
+        // Exactly at the limit is not truncated.
+        assert_eq!(truncate_name("123456", 6), "123456");
+    }
+
+    #[test]
+    fn truncate_name_marks_overlong_names() {
+        // 19 chars, max 18 -> 17 kept + '~'
+        let long = "chromium-launcher-x";
+        let out = truncate_name(long, 18);
+        assert_eq!(out.chars().count(), 18);
+        assert!(out.ends_with('~'));
+        assert_eq!(out, "chromium-launcher~");
+    }
+
+    #[test]
+    fn parse_active_sclk_picks_starred_line() {
+        let s = "0: 200Mhz\n1: 728Mhz *\n2: 1300Mhz";
+        assert_eq!(parse_active_sclk(s), Some(728));
+    }
+
+    #[test]
+    fn parse_active_sclk_handles_mixed_case_suffix() {
+        assert_eq!(parse_active_sclk("3: 1600MHz *"), Some(1600));
+    }
+
+    #[test]
+    fn parse_active_sclk_none_when_no_star() {
+        assert_eq!(parse_active_sclk("0: 200Mhz\n1: 728Mhz"), None);
+        assert_eq!(parse_active_sclk(""), None);
+    }
+
+    #[test]
+    fn cpu_busy_pct_basic() {
+        // total moved by 100, idle moved by 25 -> 75% busy.
+        assert_eq!(cpu_busy_pct(1000, 4000, 1025, 4100), 75.0);
+    }
+
+    #[test]
+    fn cpu_busy_pct_no_progress_is_zero() {
+        // No change in total -> 0, never NaN.
+        assert_eq!(cpu_busy_pct(1000, 4000, 1000, 4000), 0.0);
+    }
+
+    #[test]
+    fn cpu_busy_pct_handles_counter_reset() {
+        // Counters going backwards saturate to 0 rather than underflowing.
+        assert_eq!(cpu_busy_pct(2000, 8000, 1000, 4000), 0.0);
+    }
+
+    #[test]
+    fn parse_zram_mm_stat_converts_bytes_to_kb() {
+        // orig=2_097_152 B (2048 KB), compr=1_048_576 B (1024 KB)
+        let (orig, compr) = parse_zram_mm_stat("2097152 1048576 1300000 0 1310720 0 0 0");
+        assert_eq!(orig, 2048);
+        assert_eq!(compr, 1024);
+    }
+
+    #[test]
+    fn parse_zram_mm_stat_handles_empty() {
+        assert_eq!(parse_zram_mm_stat(""), (0, 0));
+    }
 }
